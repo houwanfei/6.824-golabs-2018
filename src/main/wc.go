@@ -1,8 +1,8 @@
 package main
 
 import (
+	"6.824/src/mapreduce"
 	"fmt"
-	"mapreduce"
 	"os"
 )
 

@@ -226,3 +226,13 @@ func TestManyFailures(t *testing.T) {
 		}
 	}
 }
+
+func TestLearn(t *testing.T) {
+	var wordMap = make(map[string]int)
+	value := wordMap["haha"]
+	if value == 0 {
+		println("haha")
+		wordMap["haha"] = 1
+	}
+	println(wordMap)
+}

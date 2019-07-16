@@ -1,6 +1,10 @@
 package mapreduce
 
-import "fmt"
+import (
+	"fmt"
+	"log"
+	"sync"
+)
 
 //
 // schedule() starts and waits for all tasks in the given phase (mapPhase
@@ -30,5 +34,47 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	//
 	// Your code here (Part III, Part IV).
 	//
+	var wg sync.WaitGroup
+	switch phase {
+	case mapPhase:
+		for i, file := range mapFiles {
+			args := new(DoTaskArgs)
+			args.File = file
+			args.JobName = jobName
+			args.Phase = phase
+			args.TaskNumber = i
+			args.NumOtherPhase = n_other
+			worker := <-registerChan
+			wg.Add(1)
+			go func(work string, taskArgs *DoTaskArgs, group *sync.WaitGroup) {
+				ok := call(work, "Worker.DoTask", taskArgs, nil)
+				if ok {
+					group.Done()
+					log.Printf("%d map task finish", taskArgs.TaskNumber)
+					registerChan <- work
+				}
+			}(worker, args, &wg)
+		}
+		wg.Wait()
+	case reducePhase:
+		for i := 0; i < ntasks; i++ {
+			args := new(DoTaskArgs)
+			args.JobName = jobName
+			args.Phase = phase
+			args.TaskNumber = i
+			args.NumOtherPhase = n_other
+			worker := <-registerChan
+			wg.Add(1)
+			go func(work string, taskArgs *DoTaskArgs, group *sync.WaitGroup) {
+				ok := call(work, "Worker.DoTask", taskArgs, nil)
+				if ok {
+					group.Done()
+					log.Printf("%d reduce task finish", taskArgs.TaskNumber)
+					registerChan <- work
+				}
+			}(worker, args, &wg)
+		}
+		wg.Wait()
+	}
 	fmt.Printf("Schedule: %v done\n", phase)
 }

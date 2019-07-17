@@ -46,14 +46,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 			args.NumOtherPhase = n_other
 			worker := <-registerChan
 			wg.Add(1)
-			go func(work string, taskArgs *DoTaskArgs, group *sync.WaitGroup) {
-				ok := call(work, "Worker.DoTask", taskArgs, nil)
-				if ok {
-					group.Done()
-					log.Printf("%d map task finish", taskArgs.TaskNumber)
-					registerChan <- work
-				}
-			}(worker, args, &wg)
+			go doTask(worker, args, &wg, registerChan)
 		}
 		wg.Wait()
 	case reducePhase:
@@ -65,16 +58,21 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 			args.NumOtherPhase = n_other
 			worker := <-registerChan
 			wg.Add(1)
-			go func(work string, taskArgs *DoTaskArgs, group *sync.WaitGroup) {
-				ok := call(work, "Worker.DoTask", taskArgs, nil)
-				if ok {
-					group.Done()
-					log.Printf("%d reduce task finish", taskArgs.TaskNumber)
-					registerChan <- work
-				}
-			}(worker, args, &wg)
+			go doTask(worker, args, &wg, registerChan)
 		}
 		wg.Wait()
 	}
 	fmt.Printf("Schedule: %v done\n", phase)
+}
+
+func doTask(work string, taskArgs *DoTaskArgs, group *sync.WaitGroup, registerChan chan string) {
+	ok := call(work, "Worker.DoTask", taskArgs, nil)
+	if ok {
+		group.Done()
+		log.Printf("%d map task finish", taskArgs.TaskNumber)
+		registerChan <- work
+	} else {
+		work = <-registerChan
+		doTask(work, taskArgs, group, registerChan)
+	}
 }

@@ -39,7 +39,7 @@ func mapF(document string, value string) (res []mapreduce.KeyValue) {
 func reduceF(key string, values []string) string {
 	// Your code here (Part V).
 	lens := len(values)
-	result := key + ": " + strconv.Itoa(lens) + " "
+	result := strconv.Itoa(lens) + " "
 	for i := 0; i < lens; i++ {
 		if i != lens-1 {
 			result = result + values[i] + ","

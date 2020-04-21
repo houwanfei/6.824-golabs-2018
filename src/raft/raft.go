@@ -47,7 +47,7 @@ type ApplyMsg struct {
 
 type LogEntity struct {
 	Command interface{}
-	term    int
+	Term    int
 }
 
 //
@@ -73,6 +73,9 @@ type Raft struct {
 	leaderChan chan bool
 
 	voteChan chan bool
+
+	//用户提交的channel
+	applyCh chan ApplyMsg //提交的日志，该channel是client传递给raft的一个参数，用于监听提交的消息
 
 	state int //1.follower 2.candidate 3.leader
 
@@ -160,7 +163,9 @@ type RequestVoteArgs struct {
 
 	CandidateId int
 
-	//todo 请求投票时日志对比
+	LastLogIndex int
+
+	LastLogTerm int
 }
 
 //
@@ -180,8 +185,15 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.currentTerm < args.Term {
 		rf.turnFollower(args.Term, args.CandidateId)
+	}
+	lastLog := rf.log[len(rf.log)-1]
+	if args.LastLogIndex < len(rf.log)-1 || args.LastLogTerm < lastLog.Term {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		return
 	}
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 		rf.votedFor = args.CandidateId
@@ -192,8 +204,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 	}
-	log.Printf("server id:%d voted server:%d success:%t", rf.me, args.CandidateId, reply.VoteGranted)
-	rf.mu.Unlock()
+	//log.Printf("server id:%d voted server:%d success:%t", rf.me, args.CandidateId, reply.VoteGranted)
 }
 
 func notify(c chan bool) {
@@ -232,7 +243,7 @@ func notify(c chan bool) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	log.Printf("sendRequestVote serverId: %d", server)
+	//log.Printf("sendRequestVote serverId: %d", server)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -254,43 +265,40 @@ type AppendEntriesReply struct {
 func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.currentTerm < args.Term {
 		rf.turnFollower(args.Term, args.LeaderId)
 	}
+
+	//log.Printf("server %d get leader index %d log size %d preindex %d preterm %d ", rf.me, args.LeaderCommitId, len(args.Entries), args.PreLogIndex, args.PreLogTerm)
 	notify(rf.heartbeatChan)
+	if args.PreLogIndex >= len(rf.log) { //没有匹配
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	} else if args.PreLogTerm != rf.log[args.PreLogIndex].Term { //任期不对
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
 	if args.Entries != nil {
 		//有日志同步
-		if args.PreLogIndex != -1 {
-			if args.PreLogIndex > len(rf.log) { //没有匹配
-				reply.Term = rf.currentTerm
-				reply.Success = false
-				rf.mu.Unlock()
-				return
-			} else if args.PreLogTerm != rf.log[args.PreLogIndex].term { //任期不对
-				reply.Term = rf.currentTerm
-				reply.Success = false
-				rf.mu.Unlock()
-				return
-			}
-		}
-		if args.PreLogIndex == -1 {
-			rf.log = append(rf.log, args.Entries...)
-		} else {
-			rf.log = append(rf.log[:args.PreLogIndex], args.Entries...)
-		}
+		rf.log = append(rf.log[:args.PreLogIndex+1], args.Entries...)
+	}
+
+	if rf.commitIndex < args.LeaderCommitId {
 		if len(rf.log) < args.LeaderCommitId {
-			rf.commitIndex = len(rf.log)
+			rf.commitIndex = len(rf.log) - 1
 		} else {
 			rf.commitIndex = args.LeaderCommitId
 		}
 	}
+	//log.Printf("server %d commit index %d command %d", rf.me, rf.commitIndex, rf.log[rf.commitIndex].Command)
 	reply.Term = rf.currentTerm
 	reply.Success = true
-	rf.mu.Unlock()
 }
 
 func (rf *Raft) sendRequestAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	log.Printf("sendRequestAppendEntries serverId: %d", server)
 	return rf.peers[server].Call("Raft.RequestAppendEntries", args, reply)
 }
 
@@ -314,17 +322,17 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	index = len(rf.log)
+	term = rf.currentTerm
 	if rf.state != 3 {
 		isLeader = false
 		return index, term, isLeader
 	}
-	logEntity := &LogEntity{command, rf.currentTerm}
-	rf.mu.Lock()
-	rf.log = append(rf.log, *logEntity)
-	index = len(rf.log)
-	rf.lastApplied = index
-	rf.mu.Unlock()
-	term = rf.currentTerm
+	rf.log = append(rf.log, LogEntity{command, term})
+	rf.nextIndex[rf.me] = index + 1
+	rf.matchIndex[rf.me] = index
 	return index, term, isLeader
 }
 
@@ -365,10 +373,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.stop = false
 	rf.leaderChan = make(chan bool)
 	rf.heartbeatChan = make(chan bool)
-	rf.log = make([]LogEntity, 0)
+	rf.log = []LogEntity{{}}
+	rf.applyCh = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
-	log.Printf("server id %d starting", me)
+	//log.Printf("server id %d starting", me)
 	rf.resetElectTimeout()
 	go rf.servers()
 	// initialize from state persisted before a crash
@@ -378,10 +387,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 func (rf *Raft) servers() {
 	for {
+		rf.preCheck()
 		if rf.stop {
 			return
 		}
-		log.Printf("node:%d state :%d", rf.me, rf.state)
 		if rf.state == 1 {
 			rf.followerProc()
 		} else if rf.state == 2 {
@@ -415,7 +424,7 @@ func (rf *Raft) candidateProc() {
 	case <-rf.heartbeatChan:
 
 	case <-rf.leaderChan:
-		log.Printf("leaderchan ok, serverid:%d", rf.me)
+
 	}
 }
 
@@ -441,8 +450,8 @@ func (rf *Raft) turnFollower(term int, leaderId int) {
 }
 
 func (rf *Raft) resetElectTimeout() {
-	rf.electionTimeout = time.Duration(500+rand.Int63n(350)) * time.Millisecond
-	log.Printf("serverId:%d, term:%d, electionTimeout:%d", rf.me, rf.currentTerm, rf.electionTimeout)
+	rf.electionTimeout = time.Duration(150+rand.Int63n(300)) * time.Millisecond
+	//log.Printf("serverId:%d, term:%d, electionTimeout:%d", rf.me, rf.currentTerm, rf.electionTimeout)
 }
 
 func (rf *Raft) turnLeader() {
@@ -452,10 +461,33 @@ func (rf *Raft) turnLeader() {
 	if rf.nextIndex == nil {
 		rf.nextIndex = make([]int, len(rf.peers))
 		rf.matchIndex = make([]int, len(rf.peers))
+	}
+	for i := range rf.peers {
+		rf.nextIndex[i] = entityLen
+		rf.matchIndex[i] = 0
+	}
+}
+
+func (rf *Raft) preCheck() {
+	rf.mu.Lock()
+	if rf.commitIndex > rf.lastApplied {
+		lastApplied := rf.lastApplied
+		commitIndex := rf.commitIndex
+		logs := rf.log
+		rf.lastApplied = rf.commitIndex
+		rf.mu.Unlock()
+		rf.apply(logs, lastApplied+1, commitIndex)
 	} else {
-		for i := 0; i < len(rf.peers); i++ {
-			rf.nextIndex[i] = entityLen
-			rf.matchIndex[i] = 0
+		rf.mu.Unlock()
+	}
+}
+
+func (rf *Raft) apply(logs []LogEntity, start, end int) {
+	for i := start; i <= end; i++ {
+		rf.applyCh <- ApplyMsg{
+			CommandIndex: i,
+			Command:      logs[i].Command,
+			CommandValid: true,
 		}
 	}
 }
@@ -470,20 +502,18 @@ func (rf *Raft) broadcastAppendEntries() {
 			args.Term = rf.currentTerm
 			args.LeaderId = rf.me
 			reply := &AppendEntriesReply{}
-			if len(rf.log) > rf.nextIndex[serverId] {
+			args.LeaderCommitId = rf.commitIndex
+			//log.Printf("server %d next index %d", serverId, rf.nextIndex[serverId])
+			if len(rf.log)-1 >= rf.nextIndex[serverId] {
 				//需要同步
 				args.Entries = rf.log[rf.nextIndex[serverId]:]
-				if rf.nextIndex[serverId] == 0 {
-					args.PreLogIndex = -1
-					args.PreLogTerm = rf.currentTerm
-				} else {
-					args.PreLogIndex = rf.nextIndex[serverId] - 1
-					args.PreLogTerm = rf.log[rf.nextIndex[serverId]-1].term
-				}
-				args.LeaderCommitId = rf.commitIndex
+				args.PreLogIndex = rf.nextIndex[serverId] - 1
+				args.PreLogTerm = rf.log[rf.nextIndex[serverId]-1].Term
+				//log.Printf("sync log to server %d, log size:%d", serverId, len(args.Entries))
 				ok := rf.sendRequestAppendEntries(serverId, args, reply)
 				if ok {
 					rf.mu.Lock()
+					defer rf.mu.Unlock()
 					if reply.Success {
 						//成功
 						rf.nextIndex[serverId] = rf.nextIndex[serverId] + len(args.Entries)
@@ -492,12 +522,18 @@ func (rf *Raft) broadcastAppendEntries() {
 						if rf.matchIndex[serverId] <= rf.commitIndex {
 							return
 						}
-						for j := 0; j < len(rf.peers); j++ {
-							if rf.matchIndex[j] == rf.matchIndex[serverId] {
-								count++
-								if count > len(rf.peers)/2 {
-									//可以提交
-									rf.commitIndex = rf.matchIndex[serverId]
+						for k := args.PreLogIndex + 1; k <= args.PreLogIndex+len(args.Entries); k++ {
+							if rf.log[k].Term != rf.currentTerm {
+								continue
+							}
+							for j := 0; j < len(rf.peers); j++ {
+								if rf.matchIndex[j] == k {
+									count++
+									if count > len(rf.peers)/2 {
+										//可以提交
+										rf.commitIndex = k
+										//log.Printf("leader commit log index :%d", k)
+									}
 								}
 							}
 						}
@@ -507,15 +543,18 @@ func (rf *Raft) broadcastAppendEntries() {
 					} else {
 						rf.nextIndex[serverId]--
 					}
-					rf.mu.Unlock()
 				}
 			} else {
 				//心跳消息
+				args.PreLogIndex = len(rf.log) - 1
+				args.PreLogTerm = rf.log[len(rf.log)-1].Term
 				ok := rf.sendRequestAppendEntries(serverId, args, reply)
-				if ok && reply.Term > rf.currentTerm {
-					rf.mu.Lock()
-					rf.turnFollower(reply.Term, i)
-					rf.mu.Unlock()
+				if ok {
+					if reply.Term > rf.currentTerm {
+						rf.mu.Lock()
+						rf.turnFollower(reply.Term, i)
+						rf.mu.Unlock()
+					}
 				}
 			}
 		}(i)
@@ -528,7 +567,9 @@ func (rf *Raft) broadcastRequestVote() {
 			continue
 		}
 		go func(serverId int) {
-			voteArgs := &RequestVoteArgs{rf.currentTerm, rf.me}
+			lastIndex := len(rf.log) - 1
+			lastLog := rf.log[lastIndex]
+			voteArgs := &RequestVoteArgs{rf.currentTerm, rf.me, lastIndex, lastLog.Term}
 			voteReply := &RequestVoteReply{}
 			if rf.sendRequestVote(serverId, voteArgs, voteReply) && voteReply.VoteGranted {
 				rf.mu.Lock()
@@ -536,7 +577,7 @@ func (rf *Raft) broadcastRequestVote() {
 					rf.voted = rf.voted + 1
 					//log.Printf("server :%d voted:%t,votedNum:%d", serverId, voteReply.VoteGranted,rf.voted)
 					if rf.voted > len(rf.peers)/2 {
-						log.Printf("server:%d success", serverId)
+						//log.Printf("server:%d success", serverId)
 						rf.turnLeader()
 						notify(rf.leaderChan)
 					}

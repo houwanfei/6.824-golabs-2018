@@ -186,25 +186,33 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if rf.currentTerm < args.Term {
-		rf.turnFollower(args.Term, args.CandidateId)
-	}
-	lastLog := rf.log[len(rf.log)-1]
-	if args.LastLogIndex < len(rf.log)-1 || args.LastLogTerm < lastLog.Term {
+	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return
 	}
-	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-		rf.votedFor = args.CandidateId
+
+	if rf.currentTerm < args.Term {
+		rf.turnFollower(args.Term, args.CandidateId)
+	}
+	if rf.agreeVote(args) && rf.agreeLog(args) {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
-		notify(rf.voteChan)
-	} else {
-		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
+		return
 	}
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
+	return
 	//log.Printf("server id:%d voted server:%d success:%t", rf.me, args.CandidateId, reply.VoteGranted)
+}
+
+func (rf *Raft) agreeLog(args *RequestVoteArgs) bool {
+	lastLog := rf.log[len(rf.log)-1]
+	return args.LastLogTerm > lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex >= len(rf.log)-1)
+}
+
+func (rf *Raft) agreeVote(args *RequestVoteArgs) bool {
+	return rf.votedFor == -1 || rf.votedFor == args.CandidateId
 }
 
 func notify(c chan bool) {
@@ -266,6 +274,12 @@ func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntri
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if rf.currentTerm > args.Term {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+
 	if rf.currentTerm < args.Term {
 		rf.turnFollower(args.Term, args.LeaderId)
 	}
@@ -493,6 +507,7 @@ func (rf *Raft) apply(logs []LogEntity, start, end int) {
 }
 
 func (rf *Raft) broadcastAppendEntries() {
+	rf.mu.Lock()
 	for i := 0; i < len(rf.peers); i++ {
 		if rf.me == i {
 			continue
@@ -559,9 +574,11 @@ func (rf *Raft) broadcastAppendEntries() {
 			}
 		}(i)
 	}
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) broadcastRequestVote() {
+	rf.mu.Lock()
 	for i := 0; i < len(rf.peers); i++ {
 		if rf.me == i {
 			continue
@@ -586,4 +603,5 @@ func (rf *Raft) broadcastRequestVote() {
 			}
 		}(i)
 	}
+	rf.mu.Unlock()
 }

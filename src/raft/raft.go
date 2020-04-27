@@ -18,7 +18,9 @@ package raft
 //
 
 import (
+	"6.824/src/labgob"
 	"6.824/src/labrpc"
+	"bytes"
 	"log"
 	"math/rand"
 	"sync"
@@ -129,6 +131,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -151,6 +160,12 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.votedFor)
+	d.Decode(&rf.log)
 }
 
 //
@@ -185,7 +200,10 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	defer func() {
+		rf.mu.Unlock()
+		rf.persist()
+	}()
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -273,7 +291,10 @@ type AppendEntriesReply struct {
 func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	defer func() {
+		rf.mu.Unlock()
+		rf.persist()
+	}()
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -347,6 +368,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, LogEntity{command, term})
 	rf.nextIndex[rf.me] = index + 1
 	rf.matchIndex[rf.me] = index
+	rf.persist()
 	return index, term, isLeader
 }
 
@@ -393,9 +415,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	//log.Printf("server id %d starting", me)
 	rf.resetElectTimeout()
-	go rf.servers()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	go rf.servers()
 	return rf
 }
 

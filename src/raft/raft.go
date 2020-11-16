@@ -555,7 +555,6 @@ func (rf *Raft) broadcastAppendEntries() {
 						//成功
 						rf.nextIndex[serverId] = rf.nextIndex[serverId] + len(args.Entries)
 						rf.matchIndex[serverId] = rf.nextIndex[serverId] - 1
-						count := 0
 						if rf.matchIndex[serverId] <= rf.commitIndex {
 							return
 						}
@@ -563,6 +562,7 @@ func (rf *Raft) broadcastAppendEntries() {
 							if rf.log[k].Term != rf.currentTerm {
 								continue
 							}
+							count := 0
 							for j := 0; j < len(rf.peers); j++ {
 								if rf.matchIndex[j] == k {
 									count++
